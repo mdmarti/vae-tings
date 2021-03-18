@@ -214,6 +214,12 @@ if __name__ == '__main__':
     x_test2 = x2[test2,:,:]
     y_test2 = y2[test2,]
 
+    x_train_all = np.vstack([x_train1,x_train2])
+    y_train_all = np.hstack([y_train1,y_train2])
+
+    x_test_all = np.vstack([x_test1, x_test2])
+    y_test_all = np.hstack([y_test1, y_test2])
+
     train_dataset1 = MNISTDataset((x_train1,y_train1))
     test_dataset1 = MNISTDataset((x_test1,y_test1))
 
@@ -237,6 +243,9 @@ if __name__ == '__main__':
         shuffle = False, num_workers=num_workers)
 
     across2 = {'train': train_across_dataloader2, 'test': test_across_dataloader2}
+
+    train_all = MNISTDataset((x_train_all, y_train_all))
+    test_all = MNISTDataset((x_test_all, y_test_all))
 
     data_across_dig = {
         'train_dat1': (x_train1,y_train1),
