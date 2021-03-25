@@ -40,6 +40,7 @@ import itertools
 import tensorflow as tf
 from torch.utils.data import Dataset, DataLoader
 from torch.distributions import LowRankMultivariateNormal
+from torch.distributions import multivariate_normal as mv
 
 
 
@@ -96,7 +97,8 @@ def calc_dkl(model1, model2, dataLoader):
 
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
-    kl = np.zeros([len(dataLoader),])
+    klq1_q2 = np.zeros([len(dataLoader),])
+    klq2_q1 = np.zeros([len(dataLoader),])
     for batch_idx, data in enumerate(dataLoader):
 
         (images, labels) = data
@@ -108,19 +110,79 @@ def calc_dkl(model1, model2, dataLoader):
             latent_dist1 = LowRankMultivariateNormal(mu1, u1, d1)
             latent_dist2 = LowRankMultivariateNormal(mu2, u2, d2)
 
-            lp1 = latent_dist1.log_prob(mu1).detach().cpu().numpy()
-            lp2 = latent_dist2.log_prob(mu2).detach().cpu().numpy()
+            l1 = latent_dist1.sample()
+            l2 = latent_dist2.sample()
 
-            kl[batch_idx] = np.sum(np.multiply(np.exp(lp1), (lp1 - lp2)))
+            lp1_1 = latent_dist1.log_prob(l1).detach().cpu().numpy()
+            lp1_2 = latent_dist2.log_prob(l1).detach().cpu().numpy()
+            lp2_1 = latent_dist1.log_prob(l2).detach().cpu().numpy()
+            lp2_2 = latent_dist2.log_prob(l2).detach().cpu().numpy()
 
-    return np.sum(kl)
+            klq1_q2[batch_idx] = np.sum(np.multiply(np.exp(lp1_1), (lp1_1 - lp1_2)))
+            klq2_q1[batch_idx] = np.sum(np.multiply(np.exp(lp2_2), (lp2_2 - lp2_1)))
+
+    return np.sum(klq1_q2), np.sum(klq2_q1)
+
+
+def check_model_params(m1,m2, fname):
+
+    layers = m1._get_layers()
+    m2.load_state(fname)
+
+    layers2 = m2._get_layers()
+    for layer_name in layers:
+        print('Layer: ', layer_name)
+        l1 = layers[layer_name]
+        l2 = layers2[layer_name]
+        if 'res' in layer_name:
+
+            l1 = list(l1.stack[0].res_block.children())
+            l2 = list(l2.stack[0].res_block.children())
+            for ind, modu in enumerate(l1):
+                try:
+                    print('Test that might not pass')
+                    print(torch.all(torch.eq(modu.weight,l2[ind].weight)))
+                except AttributeError:
+                    pass
+
+
+        else:
+        #print(l1)
+            print('Test that might not pass')
+            print(torch.all(torch.eq(l1.weight,l2.weight)))
+
+def get_latent_bugcheck(model1, model2, dataloader):
+
+    latent1 = np.zeros((len(dataloader.dataset), 32))
+    latent2 = np.zeros((len(dataloader.dataset), 32))
+
+    bool_mat = np.zeros((len(dataloader.dataset),))
+    device = torch.device("cuda")
+    i=0
+    model1.eval()
+    model2.eval()
+    for data in dataloader:
+
+        (images,labels) = data
+        images = images.to(device)
+        with torch.no_grad():
+            l1,_,_ = model1.encode(images)
+            l2,_,_ = model2.encode(images)
+        l1 = l1.detach().cpu().numpy()
+        l2 = l2.detach().cpu().numpy()
+
+        latent1[i:i+len(l1)] = l1
+        latent2[i:i+len(l2)] = l2
+
+        bool_mat[i:i+len(l1)] = np.all(l1 == l2)
+
+    return latents1, latents2, bool_mat
 ##################################
 # Import MNIST
 ##################################
 
 
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser(description='Choose training options')
     parser.add_argument("-qp", \
             help='Chooses quantization procedure for initial model. If qp=="vq", quantaziation done by vqvae. If qp=="km", done by KMeans.',\
@@ -163,12 +225,13 @@ if __name__ == '__main__':
     # this will actually be randomly splitting to disjoint groups
     # one set gets some digits, another gets the others
 
-    batch_size = 128
+    batch_size = 256
     num_workers = min(7,os.cpu_count()-1)
 
     split = 0.6
 
     #code for setting up between-digit split (disjoint training sets across digits)
+    np.random.RandomState(13)
     dig1 = np.random.choice(unique_labels,5, replace = False)
     dig2 = np.array([dig for dig in unique_labels if dig not in dig1])
 
@@ -176,6 +239,7 @@ if __name__ == '__main__':
     #print(x1.shape)
     x2 = np.array([x_data for ind, x_data in enumerate(x_all) if y_all[ind] in dig2])
     y1 = np.hstack([y for y in y_all if y in dig1])
+
     y2 = np.hstack([y for y in y_all if y in dig2])
 
     n_dat1 = len(y1)
@@ -190,7 +254,7 @@ if __name__ == '__main__':
     n_test1 = n_dat1 - n_train1
     n_test2 = n_dat2 - n_train2
 
-    np.random.seed(35)
+    #np.random.seed(35)
 
     order1 = np.random.permutation(n_dat1)
     order2 = np.random.permutation(n_dat2)
@@ -247,6 +311,12 @@ if __name__ == '__main__':
     train_all = MNISTDataset((x_train_all, y_train_all))
     test_all = MNISTDataset((x_test_all, y_test_all))
 
+    train_all_dataloader = DataLoader(train_all, batch_size = batch_size, \
+        shuffle = True, num_workers=num_workers)
+    test_all_dataloader = DataLoader(test_all, batch_size = batch_size, \
+        shuffle = True, num_workers=num_workers)
+
+    across_all = {'train': train_all_dataloader, 'test': test_all_dataloader}
     data_across_dig = {
         'train_dat1': (x_train1,y_train1),
         'train_dat2': (x_train2,y_train2),
@@ -273,21 +343,27 @@ if __name__ == '__main__':
 
     ######## Training template VAEs #######
     if qtype == 'km':
-        vae_template1_save = os.path.join(root, 'vae_MNIST_template1')
-        vae_template2_save = os.path.join(root,'vae_MNIST_template2')
+        vae_template1_save = os.path.join(root, 'vae_MNIST_template_test')
+        #vae_template2_save = os.path.join(root,'vae_MNIST_template2')
         vae_template1 = VAE(save_dir = vae_template1_save, z_dim = z_dim)
-        vae_template2 = VAE(save_dir = vae_template2_save, z_dim = z_dim)
-        template1_fname = os.path.join(vae_template1_save, 'checkpoint_200.tar')
-        template2_fname = os.path.join(vae_template2_save, 'checkpoint_200.tar')
+        vae_template2 = VAE(save_dir = vae_template1_save, z_dim = z_dim)
+        #vae_template2 = VAE(save_dir = vae_template2_save, z_dim = z_dim)
+        template1_fname = os.path.join(vae_template1_save, 'checkpoint_050.tar')
+        #template2_fname = os.path.join(vae_template2_save, 'checkpoint_200.tar')
         print('Training template VAEs')
         if not os.path.isfile(template1_fname):
-            vae_template1.train_loop(across1,epochs=201,test_freq=None,vis_freq=5)
+            vae_template1.train_loop(across_all,epochs=201,test_freq=None,vis_freq=5)
+            #vae_template2.load_state(template1_fname)
+            #vae_template2.train_loop(across_all,epochs=9,test_freq=None,vis_freq=5)
         else:
             vae_template1.load_state(template1_fname)
-        if not os.path.isfile(template2_fname):
-            vae_template2.train_loop(across1,epochs=201,test_freq=None,vis_freq=5)
-        else:
-            vae_template2.load_state(template2_fname)
+        #if not os.path.isfile(template2_fname):
+        #    vae_template2.train_loop(across1,epochs=201,test_freq=None,vis_freq=5)
+        #else:
+        #    vae_template2.load_state(template2_fname)
+
+        #bug checking
+
     elif atype == 'qp':
         vqvae_template1_save = os.path.join(root, 'vqvae_MNIST_template1')
         vqvae_template2_save = os.path.join(root,'vqvae_MNIST_template2')
@@ -297,7 +373,7 @@ if __name__ == '__main__':
         template2_fname = os.path.join(vae_template2_save, 'checkpoint_200.tar')
 
     latents1 = vae_template1.get_latent(latents_dataloader1)
-    latents2 = vae_template2.get_latent(latents_dataloader2)
+    latents2 = vae_template1.get_latent(latents_dataloader2)
 
     qps_l1 = []
     qps_l2 = []
@@ -445,11 +521,16 @@ if __name__ == '__main__':
         pca_transform = PCA(n_components = 2)
         color_orig = 'dodgerblue'
         model_colors = ['lime','brown','darkblue','crimson']
+        kl_qp_l1 = []
+        kl_qp_l2 = []
         for qp_ind, n_qp in enumerate(n_qps):
 
-            beta_qpvae = 2.75*n_qp/batch_size
+            tmp_kl_l1 = []
+            tmp_kl_l2 = []
+            beta_qpvae = 2.75*batch_size/n_qp
 
-            print('Training on N QPs = ', n_qp)
+            print('Training on N from torch.distributions import multivariate_normal as mv
+QPs = ', n_qp)
             oldx1 = old_datax1[qp_ind]
             oldx2 = old_datax2[qp_ind]
             #print(oldx1.shape)
@@ -493,14 +574,17 @@ if __name__ == '__main__':
             vqvaes2.append(VQ_VAE(save_dir = vqvae_save2, z_dim=z_dim,\
                 n_embeddings=n_qp,beta=1.0,n_train=n_train2))
             '''
-            vaes1.append(VAE(save_dir = vae_save1, z_dim=z_dim))
-            vaes2.append(VAE(save_dir = vae_save2, z_dim=z_dim))
+            vaes1 = VAE(save_dir = vae_save1, z_dim=z_dim)
+            vaes2 = VAE(save_dir = vae_save2, z_dim=z_dim)
+            #dummyvae = VAE(save_dir = vae_save1, z_dim=z_dim)
 
-            bvaes1.append(B_VAE(save_dir = bvae_save1, z_dim=z_dim, beta=beta_bvae))
-            bvaes2.append(B_VAE(save_dir = bvae_save2, z_dim=z_dim, beta=beta_bvae))
+            bvaes1 = B_VAE(save_dir = bvae_save1, z_dim=z_dim, beta=beta_bvae)
+            bvaes2 = B_VAE(save_dir = bvae_save2, z_dim=z_dim, beta=beta_bvae)
+            #dummybvae = B_VAE(save_dir = bvae_save2, z_dim=z_dim, beta=beta_bvae)
 
-            qpvaes1.append(QP_VAE(save_dir=qpvae_save1, z_dim=z_dim,no_sample = True,tau = beta_qpvae))
-            qpvaes2.append(QP_VAE(save_dir=qpvae_save2, z_dim=z_dim,no_sample = True, tau = beta_qpvae))
+            qpvaes1 = QP_VAE(save_dir=qpvae_save1, z_dim=z_dim,no_sample = True,tau = beta_qpvae)
+            qpvaes2 = QP_VAE(save_dir=qpvae_save2, z_dim=z_dim,no_sample = True, tau = beta_qpvae)
+            #dummyqpvae = QP_VAE(save_dir=qpvae_save1, z_dim=z_dim,no_sample = True,tau = beta_qpvae)
 
             vae1_filename = os.path.join(vae_save1, 'checkpoint_200.tar')
             vae2_filename = os.path.join(vae_save2, 'checkpoint_200.tar')
@@ -515,25 +599,43 @@ if __name__ == '__main__':
             #### training/loading vanilla vaes ####
             print('Training/Loading Vanilla VAEs')
             if not os.path.isfile(vae1_filename):
-                vaes1[qp_ind].train_loop(across1_copy,epochs=201,test_freq=None,vis_freq=5)
+                vaes1.train_loop(across1_copy,epochs=201,test_freq=None,vis_freq=5)
+            #    vaes1.load_state(vae1_filename)
+        #        vaes1.train_loop(across1_copy,epochs=9,test_freq=None,vis_freq=5)
             else:
-                vaes1[qp_ind].load_state(vae1_filename)
+                vaes1.load_state(vae1_filename)
+        #        vaes1.train_loop(across1_copy,epochs=9,test_freq=None,vis_freq=5)
+
             if not os.path.isfile(vae2_filename):
-                vaes2[qp_ind].train_loop(across2_copy,epochs=201,test_freq=None,vis_freq=5)
+                vaes2.train_loop(across2_copy,epochs=201,test_freq=None,vis_freq=5)
+        #        vaes2.load_state(vae2_filename)
+        #        vaes2.train_loop(across2_copy,epochs=9,test_freq=None,vis_freq=5)
             else:
-                vaes2[qp_ind].load_state(vae2_filename)
+                vaes2.load_state(vae2_filename)
+        #        vaes2.train_loop(across2_copy,epochs=9,test_freq=None,vis_freq=5)
+
+            #dummyvae.load_state(vae1_filename)
+
 
             #### training/loading beta vaes
             print('Training/Loading Beta VAEs')
             if not os.path.isfile(bvae1_filename):
-                bvaes1[qp_ind].train_loop(across1_copy,epochs=201,test_freq=None,vis_freq=5)
+                bvaes1.train_loop(across1_copy,epochs=201,test_freq=None,vis_freq=5)
+                #bvaes1.load_state(bvae1_filename)
+                #bvaes1.train_loop(across1_copy,epochs=9,test_freq=None,vis_freq=5)
             else:
-                bvaes1[qp_ind].load_state(bvae1_filename)
-            if not os.path.isfile(bvae2_filename):
-                bvaes2[qp_ind].train_loop(across2_copy,epochs=201,test_freq=None,vis_freq=5)
-            else:
-                bvaes2[qp_ind].load_state(bvae2_filename)
+                bvaes1.load_state(bvae1_filename)
+            #    bvaes1.train_loop(across1_copy,epochs=9,test_freq=None,vis_freq=5)
 
+            if not os.path.isfile(bvae2_filename):
+                bvaes2.train_loop(across2_copy,epochs=201,test_freq=None,vis_freq=5)
+            #    bvaes2.load_state(bvae2_filename)
+            #    bvaes2.train_loop(across2_copy,epochs=9,test_freq=None,vis_freq=5)
+            else:
+                bvaes2.load_state(bvae2_filename)
+            #    bvaes2.train_loop(across2_copy,epochs=9,test_freq=None,vis_freq=5)
+
+            #dummybvae.load_state(bvae1_filename)
             #### training/loading vqvaes
             print('Training/Loading VQVAEs')
             '''
@@ -552,16 +654,24 @@ if __name__ == '__main__':
             #### training/loading qpvaes
             print('Training/Loading QP-VAEs')
             if not os.path.isfile(qpvae1_filename):
-                qpvaes1[qp_ind].train_loop(across1,oldx2, oldz2,epochs=201,test_freq=None,vis_freq=5)
+                qpvaes1.train_loop(across1,oldx2, oldz2,epochs=201,test_freq=None,vis_freq=5)
+        #        qpvaes1.load_state(qpvae1_filename)
+        #        qpvaes1.train_loop(across1,oldx2, oldz2,epochs=9,test_freq=None,vis_freq=5)
             else:
-                qpvaes1[qp_ind].load_state(qpvae1_filename)
+                qpvaes1.load_state(qpvae1_filename)
+        #        qpvaes1.train_loop(across1,oldx2, oldz2,epochs=9,test_freq=None,vis_freq=5)
+
             if not os.path.isfile(qpvae2_filename):
-                qpvaes2[qp_ind].train_loop(across2,oldx1, oldz1, epochs=201,test_freq=None,vis_freq=5)
+                qpvaes2.train_loop(across2,oldx1, oldz1, epochs=201,test_freq=None,vis_freq=5)
+        #        qpvaes2.load_state(qpvae2_filename)
+        #        qpvaes2.train_loop(across2,oldx1, oldz1, epochs=9,test_freq=None,vis_freq=5)
             else:
-                qpvaes2[qp_ind].load_state(qpvae2_filename)
+                qpvaes2.load_state(qpvae2_filename)
+        #        qpvaes2.train_loop(across2,oldx1, oldz1, epochs=9,test_freq=None,vis_freq=5)
 
 
-            ######### Once models have been trained, we can compare their latent spaces
+        #    dummyqpvae.load_state(qpvae1_filename)
+            ######### Once models have been trkl_l1_1_2ained, we can compare their latent spaces
             ######### What are the right comparisons here?
 
             ######### what if we train a beta vae then compress it
@@ -573,17 +683,32 @@ if __name__ == '__main__':
 
             #latents = model.get_latent(latents_dataloader)
             print('Getting latents from all models')
-            vanilla_m1l2 = vaes1[qp_ind].get_latent(latents_dataloader2)
-            vanilla_m2l1 = vaes2[qp_ind].get_latent(latents_dataloader1)
 
-            bvae_m1l2 = bvaes1[qp_ind].get_latent(latents_dataloader2)
-            bvae_m2l1 = bvaes2[qp_ind].get_latent(latents_dataloader1)
+        #    v_m1_l2, dummy_l2, bool_mat = get_latent_bugcheck(vaes1, dummyvae, latents_dataloader2)
+            vanilla_m1l2 = vaes1.get_latent(latents_dataloader2)
+            vanilla_m2l1 = vaes2.get_latent(latents_dataloader1)
+        #    dummy1L = dummyvae.get_latent(latents_dataloader2)
+
+        #    print('Are these latents equivalent? Vanilla VAE')
+        #    print(np.all(bool_mat))
+
+        #    bv_m1_l2, dummyb_l2, bool_matb = get_latent_bugcheck(bvaes1, dummybvae, latents_dataloader2)
+            bvae_m1l2 = bvaes1.get_latent(latents_dataloader2)
+            bvae_m2l1 = bvaes2.get_latent(latents_dataloader1)
+        #    dummyb1L = dummybvae.get_latent(latents_dataloader2)
+        #    print('Are these latents equivalent? Vanilla VAE')
+        #    print(np.all(bool_matb))
             '''
             vqvae_m1l2 = vqvaes1[qp_ind].get_latent(latents_dataloader2)
             vqvae_m2l1 = vqvaes2[qp_ind].get_latent(latents_dataloader1)
             '''
-            qpvaes_m1l2 = qpvaes1[qp_ind].get_latent(latents_dataloader2)
-            qpvaes_m2l1 = qpvaes2[qp_ind].get_latent(latents_dataloader1)
+        #    qpv_m1_l2, dummyqp_l2, bool_matqp = get_latent_bugcheck(qpvaes1, dummyqpvae, latents_dataloader2)
+            qpvaes_m1l2 = qpvaes1.get_latent(latents_dataloader2)
+            qpvaes_m2l1 = qpvaes2.get_latent(latents_dataloader1)
+        #    dummyqp1L = dummyqpvae.get_latent(latents_dataloader2)
+        #    print('Are these latents equivalent? Vanilla VAE')
+        #    print(np.all(bool_matqp))
+
             print('Done!')
             all_latents1 = np.vstack([latents1,vanilla_m2l1,bvae_m2l1,qpvaes_m2l1])#vqvae_m2l1,
             all_latents2 = np.vstack([latents2,vanilla_m1l2,bvae_m1l2,qpvaes_m1l2])#vqvae_m1l2,
@@ -613,17 +738,21 @@ if __name__ == '__main__':
                 inds1 = latent_inds1 == model
                 inds2 = latent_inds2 == model
                 if model == 1:
-                    kl_data1 = calc_dkl(vae_template1,vaes1[qp_ind],latents_dataloader1)
-                    kl_data2 = calc_dkl(vae_template2,vaes2[qp_ind],latents_dataloader2)
+                    kl_l1_1_2, kl_l1_2_1 = calc_dkl(vae_template1,vaes1,latents_dataloader1)
+                    kl_l2_1_2, kl_l2_2_1 = calc_dkl(vae_template1,vaes2,latents_dataloader2)
                 elif model == 2:
-                    kl_data1 = calc_dkl(vae_template1,bvaes1[qp_ind],latents_dataloader1)
-                    kl_data2 = calc_dkl(vae_template2,bvaes2[qp_ind],latents_dataloader2)
+                    kl_l1_1_2, kl_l1_2_1 = calc_dkl(vae_template1,bvaes1,latents_dataloader1)
+                    kl_l2_1_2, kl_l2_2_1 = calc_dkl(vae_template1,bvaes2,latents_dataloader2)
                 elif model == 3:
-                    kl_data1 = calc_dkl(vae_template1,qpvaes1[qp_ind],latents_dataloader1)
-                    kl_data2 = calc_dkl(vae_template2,qpvaes2[qp_ind],latents_dataloader2)
+                    kl_l1_1_2, kl_l1_2_1 = calc_dkl(vae_template1,qpvaes1,latents_dataloader1)
+                    kl_l2_1_2, kl_l2_2_1 = calc_dkl(vae_template1,qpvaes2,latents_dataloader2)
 
-                print('KL Divergence between template and ', mname, ' latents 1 : ', kl_data1)
-                print('KL Divergence between template and ', mname, ' latents 2 : ', kl_data2)
+                tmp_kl_l1.append(kl_l1_1_2)
+                tmp_kl_l2.append(kl_l2_1_2)
+                print('D(q_1||q_2) template and ', mname, ' latents 1 : ', kl_l1_1_2)
+                print('D(q_1||q_2) template and ', mname, ' latents 2 : ', kl_l2_1_2)
+                print('D(q_2||q_1) template and ', mname, ' latents 1 : ', kl_l1_2_1)
+                print('D(q_2||q_1) template and ', mname, ' latents 2 : ', kl_l2_2_1)
                 ##### UMAP Plots ####
                 save_filename1 = os.path.join(root, mname + '_' + \
                                         str(n_qp) + 'qps_latents1_comparison_umap.pdf')
@@ -685,6 +814,39 @@ if __name__ == '__main__':
                 plt.axis('square')
                 plt.savefig(save_filename2)
                 plt.close('all')
+
+
+            kl_qp_l1.append(tmp_kl_l1)
+            kl_qp_l2.append(tmp_kl_l2)
+            ax=plt.gca()
+            offset = 0.0
+            x = np.array([1,2,3])
+            tick = ['VAE', 'BVAE', 'QPVAE']
+            save_filename1 = os.path.join(root, 'kl_bar_latents1.png')
+            save_filename1 = os.path.join(root, 'kl_bar_latents2.png')
+
+            for fd in kl_qp_l1:
+                tx = x + offset
+
+                plt.bar(tx,fd,width=0.2,tick_label=tick)
+                offset += 0.2
+            plt.tight_layout()
+            plt.savefig(save_filename1)
+            plt.close('all')
+
+            offset = 0.0
+            ax=plt.gca()
+            tick = ['VAE', 'BVAE', 'QPVAE']
+
+            for fd in kl_qp_l2:
+                tx = x + offset
+
+                plt.bar(tx,fd,width=0.2,tick_label=tick)
+                offset += 0.2
+            plt.tight_layout()
+            plt.savefig(save_filename2)
+            plt.close('all')
+
 
             ####PCA all plots
             save_filename1 = os.path.join(root, \
@@ -794,6 +956,7 @@ if __name__ == '__main__':
 
 
             (beta, n_qp) = b_qp
+            beta_qpvae = beta*batch_size/n_qp
 
             qp_ind = n_qps.index(n_qp)
             #print(f'M = {tmpM:d}, d2 = {tmpd2:d}')
