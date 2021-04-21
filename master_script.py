@@ -6,6 +6,7 @@ import pickle
 import os
 from toy_model_script import toy_model_script
 from mnist_model_script import mnist_model_script
+from bird_model_script import bird_model_script
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -86,6 +87,8 @@ mnistpath = os.path.join(root,'mnist_models')
 if not os.path.isdir(mnistpath):
     os.mkdir(mnistpath)
 
+birdpath = os.path.join(root,'bird_models')
+
 toyds_name = os.path.join(root,'toy_ds.pickle')
 print('Doing toy dataset experiments')
 if not os.path.isfile(toyds_name):
@@ -122,6 +125,25 @@ else:
         logdet_mat_mnists = data_mnist['logdet_s']
 print('Done!')
 
+
+birdds_name = os.path.join(root,'bird_ds.pickle')
+print('Doing Bird dataset experiments')
+
+if not os.path.isfile(birdds_name):
+    MSE_mat_birdj, logdet_mat_birdj, MSE_mat_birds, logdet_mat_birds = \
+                    bird_model_script(n_train_runs = n_train_runs,root = birdpath)
+    bird_dict = {'mse_j':MSE_mat_birdj,'mse_s':MSE_mat_birds,'logdet_j':logdet_mat_birdj,'logdet_s':logdet_mat_birds}
+
+    with open(birdds_name,'wb') as f:
+        pickle.dump(bird_dict,f,protocol=pickle.HIGHEST_PROTOCOL)
+else:
+    with open(birdds_name,'rb') as f:
+        data_bird = pickle.load(f)
+        MSE_mat_birdj = data_bird['mse_j']
+        MSE_mat_birds = data_bird['mse_s']
+        logdet_mat_birdj = data_bird['logdet_j']
+        logdet_mat_birds = data_bird['logdet_s']
+print('Done!')
 '''
 MSE_mat_imagenetj, logdet_mat_imagenetj, MSE_mat_imagenets, logdet_mat_imagenets = \
                     imagenet_model_script(n_train_runs = n_train_runs)
@@ -140,6 +162,9 @@ toy_mses_reshape = np.reshape(MSE_mat_toys,(-1,5,3))
 
 mnist_msej_reshape = np.reshape(MSE_mat_mnistj,(-1,3,3))
 mnist_mses_reshape = np.reshape(MSE_mat_mnists,(-1,3,3))
+
+bird_msej_reshape = np.reshape(MSE_mat_birdj,(-1,2,3))
+bird_mses_reshape = np.reshape(MSE_mat_birds,(-1,2,3))
 
 #toy_msej_reshapem = np.mean(toy_msej_reshape,axis=0)
 '''
@@ -327,6 +352,82 @@ for qp_ind in range(n_qp_m):
 #    maxj.yaxis.set_major_formatter(PercentFormatter(xmax=1))
 
     plt.savefig('logv_results_MNISTs_nqp' + str(n_qps_m[qp_ind]) + '.png')
+    plt.close('all')
+
+for qp_ind in range(n_qp_m-1):
+
+    mse_figj, (ax1,ax2) = plt.subplots(nrows=1,ncols=2)
+
+    tmp_msej = bird_msej_reshape[:,qp_ind,:]
+    tmp_logdetj = logdet_mat_birdj[:,qp_ind,:]/10
+
+    tmp_msepd = pd.DataFrame(tmp_msej, columns = ['VAE','BVAE','RVAE'])
+    tmp_msepd['lat_id'] = tmp_msepd.index
+    tmp_msepd = pd.melt(tmp_msepd, id_vars=['lat_id'],value_vars=['VAE','BVAE','RVAE'],var_name='Model',value_name='log_distortion')
+
+    tmp_ldpd = pd.DataFrame(tmp_logdetj, columns = ['VAE','BVAE','RVAE'])
+    tmp_ldpd['lat_id'] = tmp_ldpd.index
+    tmp_ldpd = pd.melt(tmp_ldpd, id_vars=['lat_id'],value_vars=['VAE','BVAE','RVAE'],var_name='Model',value_name='logdet')
+
+    plt.subplots_adjust(wspace=0.6)
+    #maxj = plt.gca()
+    mse_figj, (ax1,ax2) = plt.subplots(nrows=1,ncols=2)
+    plt.subplots_adjust(wspace=0.6)
+
+    #maxj = plt.gca()
+    ax1 = sns.violinplot(x='Model',y='log_distortion',hue='Model',data=tmp_msepd,ax=ax1)
+    ax1.set_title('distortion bird')
+#    ax1.legend()
+    #ax1.set_xlabel('distortion (MSE)')
+
+
+    ax2 = sns.violinplot(x='Model',y='logdet',hue='Model',data=tmp_ldpd,ax=ax2)
+    ax2.set_title('logdet bird, n qp = ' +  str(n_qps_m[qp_ind]))
+    #ax2.legend()
+    #ax2.set_xlabel('logdet')
+
+
+#    maxj.yaxis.set_major_formatter(PercentFormatter(xmax=1))
+
+    plt.savefig('v_results_birdj_nqp' + str(n_qps_m[qp_ind]) + '.png')
+    plt.close('all')
+
+for qp_ind in range(n_qp_m - 1):
+
+    mse_figj, (ax1,ax2) = plt.subplots(nrows=1,ncols=2)
+
+    tmp_mses = bird_mses_reshape[:,qp_ind,:]
+    tmp_logdets = logdet_mat_birds[:,qp_ind,:]/10
+
+    tmp_msepd = pd.DataFrame(tmp_mses, columns = ['VAE','BVAE','RVAE'])
+    tmp_msepd['lat_id'] = tmp_msepd.index
+    tmp_msepd = pd.melt(tmp_msepd, id_vars=['lat_id'],value_vars=['VAE','BVAE','RVAE'],var_name='Model',value_name='log_distortion')
+
+    tmp_ldpd = pd.DataFrame(tmp_logdets, columns = ['VAE','BVAE','RVAE'])
+    tmp_ldpd['lat_id'] = tmp_ldpd.index
+    tmp_ldpd = pd.melt(tmp_ldpd, id_vars=['lat_id'],value_vars=['VAE','BVAE','RVAE'],var_name='Model',value_name='logdet')
+
+    plt.subplots_adjust(wspace=0.6)
+    #maxj = plt.gca()
+    mse_figj, (ax1,ax2) = plt.subplots(nrows=1,ncols=2)
+    plt.subplots_adjust(wspace=0.6)
+
+    #maxj = plt.gca()
+    ax1 = sns.violinplot(x='Model',y='log_distortion',hue='Model',data=tmp_msepd,ax=ax1)
+    ax1.set_title('distortion bird')
+#    ax1.legend()
+    #ax1.set_xlabel('distortion (MSE)')
+
+
+    ax2 = sns.violinplot(x='Model',y='logdet',hue='Model',data=tmp_ldpd,ax=ax2)
+    ax2.set_title('logdet bird, n qp = ' +  str(n_qps_m[qp_ind]))
+    #ax2.legend()
+    #ax2.set_xlabel('logdet')
+
+
+#    maxj.yaxis.set_major_formatter(PercentFormatter(xmax=1))
+
+    plt.savefig('v_results_birds_nqp' + str(n_qps_m[qp_ind]) + '.png')
     plt.close('all')
 '''
 MSE_matj: n_latent_points x n_train_runs x n_qp x n_model types for joint template
